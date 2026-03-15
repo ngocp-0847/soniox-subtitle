@@ -265,42 +265,38 @@ pub async fn run_capture(
                                 continue;
                             }
 
-                            eprintln!(
-                                "[ws] tokens: {:?}",
-                                meaningful.iter().map(|t| &t.text).collect::<Vec<_>>()
-                            );
-
-                            let mut new_text = String::new();
-                            let mut has_final = false;
+                            // Separate final (committed) tokens from non-final (live hypothesis)
+                            let mut final_text = String::new();
+                            let mut nonfinal_text = String::new();
                             for t in &meaningful {
                                 if t.is_final == Some(true) {
-                                    has_final = true;
+                                    final_text.push_str(&t.text);
+                                } else {
+                                    nonfinal_text.push_str(&t.text);
                                 }
-                                new_text.push_str(&t.text);
                             }
 
-                            if has_final {
-                                stable_text.push_str(new_text.trim());
-                                stable_text.push(' ');
+                            // Append only finalized words to stable buffer
+                            if !final_text.is_empty() {
+                                stable_text.push_str(&final_text);
+                                // Rolling window: keep last 80 words
                                 let words: Vec<&str> =
                                     stable_text.split_whitespace().collect();
                                 if words.len() > 80 {
                                     stable_text =
                                         words[words.len() - 50..].join(" ") + " ";
                                 }
+                            }
+
+                            // Display = committed words + live non-final hypothesis
+                            let display = format!("{}{}", stable_text, nonfinal_text);
+                            let display = display.trim().to_string();
+                            if !display.is_empty() {
                                 let _ = app_recv.emit(
                                     "transcript",
                                     TranscriptEvent {
-                                        text: stable_text.trim().to_string(),
-                                        is_final: true,
-                                    },
-                                );
-                            } else {
-                                let _ = app_recv.emit(
-                                    "transcript",
-                                    TranscriptEvent {
-                                        text: format!("{}{}", stable_text, new_text.trim()),
-                                        is_final: false,
+                                        text: display,
+                                        is_final: nonfinal_text.is_empty(),
                                     },
                                 );
                             }
