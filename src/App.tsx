@@ -79,8 +79,12 @@ export default function App() {
         className="titlebar"
         data-tauri-drag-region
         onMouseDown={async (e) => {
-          // Only drag on left click, not on buttons
-          if (e.button === 0 && (e.target as HTMLElement).closest('.titlebar-actions') === null) {
+          // Drag only when NOT pinned, and not clicking action buttons
+          if (
+            e.button === 0 &&
+            !alwaysOnTop &&
+            (e.target as HTMLElement).closest('.titlebar-actions') === null
+          ) {
             await getCurrentWindow().startDragging();
           }
         }}
