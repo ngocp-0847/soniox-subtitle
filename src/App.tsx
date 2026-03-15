@@ -16,6 +16,7 @@ export default function App() {
   const [transcript, setTranscript] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [alwaysOnTop, setAlwaysOnTop] = useState(true);
+  const alwaysOnTopRef = useRef(true); // avoid stale closure in mousedown
   const transcriptRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -67,7 +68,12 @@ export default function App() {
   const toggleAlwaysOnTop = async () => {
     const next = !alwaysOnTop;
     setAlwaysOnTop(next);
+    alwaysOnTopRef.current = next;
     await invoke("set_always_on_top", { onTop: next });
+  };
+
+  const closeApp = async () => {
+    await getCurrentWindow().close();
   };
 
   const clearTranscript = () => setTranscript("");
@@ -79,10 +85,9 @@ export default function App() {
         className="titlebar"
         data-tauri-drag-region
         onMouseDown={async (e) => {
-          // Drag only when NOT pinned, and not clicking action buttons
           if (
             e.button === 0 &&
-            !alwaysOnTop &&
+            !alwaysOnTopRef.current &&
             (e.target as HTMLElement).closest('.titlebar-actions') === null
           ) {
             await getCurrentWindow().startDragging();
@@ -105,6 +110,11 @@ export default function App() {
             onClick={() => setShowSettings(!showSettings)}
             title="Settings"
           >⚙️</button>
+          <button
+            className="btn-icon btn-close"
+            onClick={closeApp}
+            title="Close"
+          >✕</button>
         </div>
       </div>
 

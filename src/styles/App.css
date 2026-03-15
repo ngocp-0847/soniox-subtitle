@@ -80,6 +80,17 @@
   opacity: 1;
 }
 
+.btn-close {
+  font-size: 12px;
+  font-weight: 700;
+  color: #888;
+}
+.btn-close:hover {
+  background: rgba(239, 68, 68, 0.3) !important;
+  color: #fca5a5 !important;
+  opacity: 1;
+}
+
 /* Transcript */
 .transcript-area {
   flex: 1;
