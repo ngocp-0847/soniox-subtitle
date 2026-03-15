@@ -83,7 +83,6 @@ export default function App() {
       {/* Draggable header */}
       <div
         className="titlebar"
-        data-tauri-drag-region
         onMouseDown={async (e) => {
           if (
             e.button === 0 &&
