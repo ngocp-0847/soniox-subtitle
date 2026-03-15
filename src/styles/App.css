@@ -1,0 +1,160 @@
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  background: rgba(10, 10, 14, 0.92);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 12px;
+  overflow: hidden;
+  user-select: none;
+}
+
+/* Titlebar */
+.titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background: rgba(255,255,255,0.04);
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+  cursor: default;
+  flex-shrink: 0;
+}
+
+.titlebar-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.rec-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #444;
+  transition: background 0.3s;
+}
+
+.rec-dot.active {
+  background: #ef4444;
+  box-shadow: 0 0 8px rgba(239,68,68,0.8);
+  animation: pulse 1s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.app-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #888;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.titlebar-actions {
+  display: flex;
+  gap: 2px;
+}
+
+.btn-icon {
+  background: transparent;
+  border: none;
+  font-size: 14px;
+  padding: 3px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+  opacity: 0.5;
+  transition: opacity 0.15s;
+}
+
+.btn-icon:hover {
+  opacity: 1;
+  background: rgba(255,255,255,0.08);
+}
+
+.btn-icon.active {
+  opacity: 1;
+}
+
+/* Transcript */
+.transcript-area {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+  scrollbar-width: thin;
+  scrollbar-color: #333 transparent;
+}
+
+.transcript-text {
+  font-size: 18px;
+  line-height: 1.6;
+  color: #f0f0f0;
+  font-weight: 400;
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+}
+
+.transcript-placeholder {
+  font-size: 14px;
+  color: #444;
+  text-align: center;
+  margin-top: 40px;
+  font-style: italic;
+}
+
+/* Error */
+.error-bar {
+  background: rgba(239, 68, 68, 0.15);
+  border-top: 1px solid rgba(239,68,68,0.3);
+  color: #fca5a5;
+  font-size: 12px;
+  padding: 8px 16px;
+  flex-shrink: 0;
+}
+
+/* Controls */
+.controls {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+  border-top: 1px solid rgba(255,255,255,0.06);
+  flex-shrink: 0;
+}
+
+.btn-record {
+  background: #6c63ff;
+  color: white;
+  border: none;
+  border-radius: 20px;
+  padding: 8px 28px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+  min-width: 120px;
+}
+
+.btn-record:hover {
+  background: #5b52e0;
+  transform: scale(1.02);
+}
+
+.btn-record.recording {
+  background: #dc2626;
+}
+
+.btn-record.recording:hover {
+  background: #b91c1c;
+}
+
+/* Recording glow effect */
+.app.is-recording {
+  border-color: rgba(239, 68, 68, 0.3);
+  box-shadow: 0 0 0 1px rgba(239, 68, 68, 0.1);
+}
