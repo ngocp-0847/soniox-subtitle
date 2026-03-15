@@ -1,5 +1,7 @@
 node_modules/
 dist/
 src-tauri/target/
-*.png
 .DS_Store
+# Ignore PNG except assets folder
+*.png
+!assets/*.png
