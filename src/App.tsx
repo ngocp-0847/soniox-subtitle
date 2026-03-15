@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import Settings from "./components/Settings";
 import "./styles/App.css";
 
@@ -74,7 +75,16 @@ export default function App() {
   return (
     <div className={`app ${recording ? "is-recording" : ""}`}>
       {/* Draggable header */}
-      <div className="titlebar" data-tauri-drag-region>
+      <div
+        className="titlebar"
+        data-tauri-drag-region
+        onMouseDown={async (e) => {
+          // Only drag on left click, not on buttons
+          if (e.button === 0 && (e.target as HTMLElement).closest('.titlebar-actions') === null) {
+            await getCurrentWindow().startDragging();
+          }
+        }}
+      >
         <div className="titlebar-left">
           <div className={`rec-dot ${recording ? "active" : ""}`} />
           <span className="app-title">Realtime Subtitles</span>
