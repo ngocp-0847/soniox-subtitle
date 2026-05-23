@@ -15,15 +15,15 @@
       {
         "label": "main",
         "title": "Realtime Subtitles",
-        "width": 560,
-        "height": 460,
-        "minWidth": 380,
-        "minHeight": 220,
+        "width": 860,
+        "height": 540,
+        "minWidth": 420,
+        "minHeight": 260,
         "resizable": true,
         "fullscreen": false,
         "decorations": false,
         "transparent": true,
-        "alwaysOnTop": true,
+        "alwaysOnTop": false,
         "shadow": true
       }
     ],

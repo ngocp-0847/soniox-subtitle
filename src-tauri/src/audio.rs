@@ -24,12 +24,16 @@ struct SonioxMessage {
 struct SonioxToken {
     text: String,
     is_final: Option<bool>,
+    translation_status: Option<String>,
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Clone, Default)]
 pub struct TranscriptEvent {
-    pub text: String,
-    pub is_final: bool,
+    pub source_stable: String,
+    pub source_live: String,
+    pub target_stable: String,
+    pub target_live: String,
+    pub has_target: bool,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -299,6 +303,7 @@ pub async fn run_capture(
     api_key: String,
     device_name: Option<String>,
     language: Option<String>,
+    target_language: Option<String>,
     stop_rx: oneshot::Receiver<()>,
 ) -> Result<()> {
     let device = pick_device(device_name.as_deref())?;
@@ -360,6 +365,18 @@ pub async fn run_capture(
             ]);
         }
     }
+    let has_translation = target_language
+        .as_ref()
+        .map(|t| !t.is_empty() && t != "none")
+        .unwrap_or(false);
+    if has_translation {
+        let tgt = target_language.as_ref().unwrap();
+        start_msg["translation"] = serde_json::json!({
+            "type": "one_way",
+            "target_language": tgt
+        });
+        eprintln!("[ws] translation: one_way → {}", tgt);
+    }
     ws_tx
         .send(Message::Text(start_msg.to_string()))
         .await
@@ -369,8 +386,17 @@ pub async fn run_capture(
     let (ws_done_tx, mut ws_done_rx) = tokio::sync::oneshot::channel::<()>();
 
     let app_recv = app.clone();
+    let has_target_clone = has_translation;
     tokio::spawn(async move {
-        let mut stable_text = String::new();
+        let mut source_stable = String::new();
+        let mut target_stable = String::new();
+        // Token classifier — bucket: ("source"|"target")
+        fn bucket_of(status: &Option<String>) -> &'static str {
+            match status.as_deref() {
+                Some("translation") => "target",
+                _ => "source", // "original", "none", or missing
+            }
+        }
         while let Some(msg) = ws_rx.next().await {
             match msg {
                 Ok(Message::Text(text)) => {
@@ -394,33 +420,46 @@ pub async fn run_capture(
                             if meaningful.is_empty() {
                                 continue;
                             }
-                            let mut final_text = String::new();
-                            let mut nonfinal_text = String::new();
+                            let mut src_final = String::new();
+                            let mut src_live = String::new();
+                            let mut tgt_final = String::new();
+                            let mut tgt_live = String::new();
                             for t in &meaningful {
-                                if t.is_final == Some(true) {
-                                    final_text.push_str(&t.text);
-                                } else {
-                                    nonfinal_text.push_str(&t.text);
+                                let b = bucket_of(&t.translation_status);
+                                let is_final = t.is_final == Some(true);
+                                match (b, is_final) {
+                                    ("source", true) => src_final.push_str(&t.text),
+                                    ("source", false) => src_live.push_str(&t.text),
+                                    ("target", true) => tgt_final.push_str(&t.text),
+                                    ("target", false) => tgt_live.push_str(&t.text),
+                                    _ => {}
                                 }
                             }
-                            if !final_text.is_empty() {
-                                stable_text.push_str(&final_text);
-                                let words: Vec<&str> = stable_text.split_whitespace().collect();
+                            // Append finals to stable buffers with rolling window
+                            if !src_final.is_empty() {
+                                source_stable.push_str(&src_final);
+                                let words: Vec<&str> = source_stable.split_whitespace().collect();
                                 if words.len() > 120 {
-                                    stable_text = words[words.len() - 80..].join(" ") + " ";
+                                    source_stable = words[words.len() - 80..].join(" ") + " ";
                                 }
                             }
-                            let display = format!("{}{}", stable_text, nonfinal_text);
-                            let display = display.trim().to_string();
-                            if !display.is_empty() {
-                                let _ = app_recv.emit(
-                                    "transcript",
-                                    TranscriptEvent {
-                                        text: display,
-                                        is_final: nonfinal_text.is_empty(),
-                                    },
-                                );
+                            if !tgt_final.is_empty() {
+                                target_stable.push_str(&tgt_final);
+                                let words: Vec<&str> = target_stable.split_whitespace().collect();
+                                if words.len() > 120 {
+                                    target_stable = words[words.len() - 80..].join(" ") + " ";
+                                }
                             }
+                            let _ = app_recv.emit(
+                                "transcript",
+                                TranscriptEvent {
+                                    source_stable: source_stable.trim_end().to_string(),
+                                    source_live: src_live,
+                                    target_stable: target_stable.trim_end().to_string(),
+                                    target_live: tgt_live,
+                                    has_target: has_target_clone,
+                                },
+                            );
                         }
                     }
                 }

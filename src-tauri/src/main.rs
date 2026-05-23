@@ -50,6 +50,10 @@ async fn start_recording(app: AppHandle) -> Result<(), String> {
         .get("language")
         .and_then(|v| v.as_str().map(|s| s.to_string()))
         .filter(|s| !s.is_empty() && s != "auto");
+    let target_language = store
+        .get("target_language")
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
+        .filter(|s| !s.is_empty() && s != "none");
 
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
     {
@@ -61,8 +65,15 @@ async fn start_recording(app: AppHandle) -> Result<(), String> {
 
     let app_handle = app.clone();
     tokio::spawn(async move {
-        if let Err(e) =
-            audio::run_capture(app_handle.clone(), api_key, device_name, language, stop_rx).await
+        if let Err(e) = audio::run_capture(
+            app_handle.clone(),
+            api_key,
+            device_name,
+            language,
+            target_language,
+            stop_rx,
+        )
+        .await
         {
             let _ = app_handle.emit("transcript-error", e.to_string());
         }
@@ -109,6 +120,7 @@ async fn get_settings(app: AppHandle) -> Result<serde_json::Value, String> {
         "api_key",
         "device_name",
         "language",
+        "target_language",
         "opacity",
         "font_size",
         "max_words",
@@ -142,6 +154,7 @@ async fn reset_settings(app: AppHandle) -> Result<(), String> {
         "api_key",
         "device_name",
         "language",
+        "target_language",
         "opacity",
         "font_size",
         "max_words",

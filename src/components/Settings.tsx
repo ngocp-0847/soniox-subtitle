@@ -18,6 +18,7 @@ interface SettingsState {
   api_key: string;
   device_name: string;
   language: string;
+  target_language: string;
   opacity: number;       // 0..1
   font_size: number;     // px
   max_words: number;
@@ -30,6 +31,7 @@ const DEFAULTS: SettingsState = {
   api_key: "",
   device_name: "Default",
   language: "auto",
+  target_language: "vi",
   opacity: 0.92,
   font_size: 18,
   max_words: 80,
@@ -42,6 +44,27 @@ const LANGUAGES: { code: string; label: string }[] = [
   { code: "auto", label: "Auto-detect" },
   { code: "en", label: "English" },
   { code: "vi", label: "Tiếng Việt" },
+  { code: "ja", label: "日本語" },
+  { code: "ko", label: "한국어" },
+  { code: "zh", label: "中文" },
+  { code: "es", label: "Español" },
+  { code: "fr", label: "Français" },
+  { code: "de", label: "Deutsch" },
+  { code: "ru", label: "Русский" },
+  { code: "pt", label: "Português" },
+  { code: "it", label: "Italiano" },
+  { code: "id", label: "Indonesia" },
+  { code: "th", label: "ไทย" },
+  { code: "hi", label: "हिन्दी" },
+  { code: "ar", label: "العربية" },
+];
+
+// Soniox supports translation into these target languages (one_way).
+// "none" disables translation.
+const TARGET_LANGUAGES: { code: string; label: string }[] = [
+  { code: "none", label: "Off (no translation)" },
+  { code: "vi", label: "Tiếng Việt" },
+  { code: "en", label: "English" },
   { code: "ja", label: "日本語" },
   { code: "ko", label: "한국어" },
   { code: "zh", label: "中文" },
@@ -166,6 +189,7 @@ export default function Settings({ onClose, onSettingsChanged }: Props) {
         api_key: s.api_key,
         device_name: s.device_name,
         language: s.language,
+        target_language: s.target_language,
         opacity: s.opacity,
         font_size: s.font_size,
         max_words: s.max_words,
@@ -294,7 +318,7 @@ export default function Settings({ onClose, onSettingsChanged }: Props) {
 
         {/* LANGUAGE */}
         <div className="settings-section">
-          <label className="label">Language</label>
+          <label className="label">Source Language</label>
           <select
             className="select"
             value={s.language}
@@ -305,6 +329,18 @@ export default function Settings({ onClose, onSettingsChanged }: Props) {
             ))}
           </select>
           <p className="hint">Hint for Soniox model. Auto-detect works for most cases.</p>
+
+          <label className="label" style={{ marginTop: 14 }}>Translate To</label>
+          <select
+            className="select"
+            value={s.target_language}
+            onChange={(e) => update("target_language", e.target.value)}
+          >
+            {TARGET_LANGUAGES.map((l) => (
+              <option key={l.code} value={l.code}>{l.label}</option>
+            ))}
+          </select>
+          <p className="hint">Subtitle is shown in source language (top) and translated language (bottom).</p>
         </div>
 
         {/* APPEARANCE */}
