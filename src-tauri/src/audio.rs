@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -17,6 +17,7 @@ const TARGET_SAMPLE_RATE: u32 = 16000;
 struct SonioxMessage {
     tokens: Option<Vec<SonioxToken>>,
     error: Option<String>,
+    error_code: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -31,17 +32,77 @@ pub struct TranscriptEvent {
     pub is_final: bool,
 }
 
-pub fn list_devices() -> Result<Vec<String>> {
+#[derive(Debug, Serialize, Clone)]
+pub struct AudioDevice {
+    pub name: String,
+    pub is_default: bool,
+    pub is_advanced: bool,
+}
+
+fn classify_advanced(name: &str) -> bool {
+    let n = name.to_lowercase();
+    n.starts_with("hw:")
+        || n.starts_with("plughw:")
+        || n.starts_with("dsnoop:")
+        || n.starts_with("dmix:")
+        || n.starts_with("front:")
+        || n.starts_with("surround")
+        || n.starts_with("iec958:")
+        || n.starts_with("sysdefault:")
+}
+
+pub fn list_devices() -> Result<Vec<AudioDevice>> {
     let host = cpal::default_host();
-    let mut devices = vec!["Default Microphone".to_string()];
-    if let Ok(input_devices) = host.input_devices() {
-        for device in input_devices {
-            if let Ok(name) = device.name() {
-                devices.push(name);
+    let default_name = host
+        .default_input_device()
+        .and_then(|d| d.name().ok())
+        .unwrap_or_default();
+
+    let mut out: Vec<AudioDevice> = Vec::new();
+    out.push(AudioDevice {
+        name: "Default".to_string(),
+        is_default: true,
+        is_advanced: false,
+    });
+
+    if let Ok(devs) = host.input_devices() {
+        for d in devs {
+            if let Ok(name) = d.name() {
+                let is_def = name == default_name;
+                out.push(AudioDevice {
+                    name,
+                    is_default: is_def,
+                    is_advanced: false,
+                });
             }
         }
     }
-    Ok(devices)
+    // mark advanced after collection
+    for d in out.iter_mut() {
+        if d.name != "Default" {
+            d.is_advanced = classify_advanced(&d.name);
+        }
+    }
+    Ok(out)
+}
+
+fn pick_device(name_opt: Option<&str>) -> Result<cpal::Device> {
+    let host = cpal::default_host();
+    match name_opt {
+        None | Some("") | Some("Default") => host
+            .default_input_device()
+            .ok_or_else(|| anyhow!("No default input device")),
+        Some(target) => {
+            for d in host.input_devices()? {
+                if let Ok(n) = d.name() {
+                    if n == target {
+                        return Ok(d);
+                    }
+                }
+            }
+            Err(anyhow!("Device not found: {}", target))
+        }
+    }
 }
 
 fn resample(samples: &[f32], src_rate: u32) -> Vec<f32> {
@@ -69,124 +130,51 @@ fn to_pcm_bytes(samples: &[f32]) -> Vec<u8> {
         .collect()
 }
 
-pub async fn run_capture(
-    app: AppHandle,
-    api_key: String,
-    stop_rx: oneshot::Receiver<()>,
+/// Spawn a CPAL capture thread.
+/// `on_mono` receives mono f32 samples at the device's sample rate.
+fn spawn_capture(
+    device: cpal::Device,
+    stop_flag: Arc<AtomicBool>,
+    mut on_mono: Box<dyn FnMut(&[f32], u32) + Send + 'static>,
 ) -> Result<()> {
-    // channel: blocking audio thread → async WS sender
-    let (audio_tx, mut audio_rx) = mpsc::channel::<Vec<u8>>(256);
-    let stop_flag = Arc::new(AtomicBool::new(false));
-    let stop_flag_thread = stop_flag.clone();
+    let config = device
+        .default_input_config()
+        .context("Failed to get device config")?;
+    let sample_rate = config.sample_rate().0;
+    let channels = config.channels() as usize;
+    let fmt = config.sample_format();
 
-    // Blocking thread for CPAL capture
     std::thread::spawn(move || {
-        let host = cpal::default_host();
-        eprintln!("[audio] host: {}", host.id().name());
-
-        let device = match host.default_input_device() {
-            Some(d) => d,
-            None => {
-                eprintln!("[audio] ERROR: No input device");
-                return;
-            }
-        };
-        eprintln!("[audio] device: {}", device.name().unwrap_or_default());
-
-        let config = match device.default_input_config() {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("[audio] Config error: {}", e);
-                return;
-            }
-        };
-
-        let sample_rate = config.sample_rate().0;
-        let channels = config.channels() as usize;
-        eprintln!(
-            "[audio] format={:?} ch={} rate={}",
-            config.sample_format(),
-            channels,
-            sample_rate
-        );
-
-        // Accumulate raw f32 mono samples, drain every 100ms worth
-        let chunk_frames = (sample_rate as usize * 100) / 1000;
-        eprintln!("[audio] chunk_frames={} (100ms)", chunk_frames);
-
-        let buf = Arc::new(std::sync::Mutex::new(Vec::<f32>::new()));
-
-        // Closure: convert input → mono f32 → push to buf → drain & send
-        let make_cb = {
-            let buf = buf.clone();
-            let tx = audio_tx.clone();
-            let stop = stop_flag_thread.clone();
-            move || {
-                let buf = buf.clone();
-                let tx = tx.clone();
-                let stop = stop.clone();
-                move |mono_chunk: Vec<f32>| {
-                    if stop.load(Ordering::Relaxed) {
-                        return;
-                    }
-                    // Log RMS level occasionally
-                    let rms: f32 = (mono_chunk.iter().map(|s| s * s).sum::<f32>()
-                        / mono_chunk.len() as f32)
-                        .sqrt();
-                    if rms > 0.001 {
-                        eprintln!("[audio] rms={:.4} len={}", rms, mono_chunk.len());
-                    }
-                    let mut b = buf.lock().unwrap();
-                    b.extend_from_slice(&mono_chunk);
-                    while b.len() >= chunk_frames {
-                        let chunk: Vec<f32> = b.drain(..chunk_frames).collect();
-                        let resampled = resample(&chunk, sample_rate);
-                        let pcm = to_pcm_bytes(&resampled);
-                        if tx.blocking_send(pcm).is_err() {
-                            stop.store(true, Ordering::Relaxed);
-                            return;
-                        }
-                    }
-                }
-            }
-        };
-
-        let stream_result = match config.sample_format() {
-            cpal::SampleFormat::F32 => {
-                let mut cb = make_cb();
-                device.build_input_stream(
-                    &config.into(),
-                    move |data: &[f32], _| {
-                        let mono: Vec<f32> = data
-                            .chunks(channels)
-                            .map(|f| f.iter().sum::<f32>() / channels as f32)
-                            .collect();
-                        cb(mono);
-                    },
-                    |e| eprintln!("[audio] stream error: {}", e),
-                    None,
-                )
-            }
-            cpal::SampleFormat::I16 => {
-                let mut cb = make_cb();
-                device.build_input_stream(
-                    &config.into(),
-                    move |data: &[i16], _| {
-                        let mono: Vec<f32> = data
-                            .chunks(channels)
-                            .map(|f| {
-                                f.iter().map(|&s| s as f32 / 32768.0).sum::<f32>()
-                                    / channels as f32
-                            })
-                            .collect();
-                        cb(mono);
-                    },
-                    |e| eprintln!("[audio] stream error: {}", e),
-                    None,
-                )
-            }
-            fmt => {
-                eprintln!("[audio] Unsupported format: {:?}", fmt);
+        let stream_result = match fmt {
+            cpal::SampleFormat::F32 => device.build_input_stream(
+                &config.into(),
+                move |data: &[f32], _| {
+                    let mono: Vec<f32> = data
+                        .chunks(channels)
+                        .map(|f| f.iter().sum::<f32>() / channels as f32)
+                        .collect();
+                    on_mono(&mono, sample_rate);
+                },
+                |e| eprintln!("[audio] stream error: {}", e),
+                None,
+            ),
+            cpal::SampleFormat::I16 => device.build_input_stream(
+                &config.into(),
+                move |data: &[i16], _| {
+                    let mono: Vec<f32> = data
+                        .chunks(channels)
+                        .map(|f| {
+                            f.iter().map(|&s| s as f32 / 32768.0).sum::<f32>()
+                                / channels as f32
+                        })
+                        .collect();
+                    on_mono(&mono, sample_rate);
+                },
+                |e| eprintln!("[audio] stream error: {}", e),
+                None,
+            ),
+            other => {
+                eprintln!("[audio] unsupported format: {:?}", other);
                 return;
             }
         };
@@ -194,35 +182,170 @@ pub async fn run_capture(
         let stream = match stream_result {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("[audio] Build stream error: {}", e);
+                eprintln!("[audio] build stream err: {}", e);
                 return;
             }
         };
-
         if let Err(e) = stream.play() {
-            eprintln!("[audio] Play error: {}", e);
+            eprintln!("[audio] play err: {}", e);
             return;
         }
 
-        eprintln!("[audio] Capture running...");
-        while !stop_flag_thread.load(Ordering::Relaxed) {
+        while !stop_flag.load(Ordering::Relaxed) {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
-        eprintln!("[audio] Capture stopped");
-        // stream drops here
     });
 
-    // Connect WebSocket
-    eprintln!("[ws] Connecting...");
+    Ok(())
+}
+
+/// Live mic-level preview: emit "mic-level" events with RMS 0..1 at ~15Hz.
+/// Returns immediately; consumer signals stop via `stop_flag`.
+pub fn run_mic_preview(
+    app: AppHandle,
+    device_name: Option<String>,
+    stop_flag: Arc<AtomicBool>,
+) -> Result<()> {
+    let device = pick_device(device_name.as_deref())?;
+    eprintln!("[mic-preview] device: {}", device.name().unwrap_or_default());
+
+    let last_emit = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
+    let app_cb = app.clone();
+    let last_emit_cb = last_emit.clone();
+
+    spawn_capture(
+        device,
+        stop_flag,
+        Box::new(move |mono: &[f32], _rate: u32| {
+            if mono.is_empty() {
+                return;
+            }
+            let rms: f32 = (mono.iter().map(|s| s * s).sum::<f32>() / mono.len() as f32).sqrt();
+            // Scale to 0..1 with mild log curve so quiet speech is visible
+            let level = (rms * 5.0).min(1.0);
+            let mut t = last_emit_cb.lock().unwrap();
+            if t.elapsed() >= std::time::Duration::from_millis(66) {
+                *t = std::time::Instant::now();
+                drop(t);
+                let _ = app_cb.emit("mic-level", level);
+            }
+        }),
+    )?;
+    Ok(())
+}
+
+/// Lightweight Soniox API key validation.
+/// Opens a WebSocket, sends start config, awaits first message. Closes after.
+pub async fn test_api_key(api_key: String) -> Result<()> {
+    let (ws_stream, _) = tokio::time::timeout(
+        std::time::Duration::from_secs(8),
+        connect_async(SONIOX_WS_URL),
+    )
+    .await
+    .context("Connection timed out")?
+    .context("Failed to connect to Soniox")?;
+
+    let (mut tx, mut rx) = ws_stream.split();
+
+    let start = serde_json::json!({
+        "api_key": api_key,
+        "model": "stt-rt-v4",
+        "audio_format": "pcm_s16le",
+        "sample_rate": TARGET_SAMPLE_RATE,
+        "num_channels": 1,
+    });
+    tx.send(Message::Text(start.to_string()))
+        .await
+        .context("Failed to send config")?;
+
+    // Read first non-empty response (or wait 3s)
+    let recv = async {
+        while let Some(msg) = rx.next().await {
+            match msg {
+                Ok(Message::Text(text)) => {
+                    if let Ok(parsed) = serde_json::from_str::<SonioxMessage>(&text) {
+                        if let Some(err) = parsed.error {
+                            return Err(anyhow!("Soniox: {}", err));
+                        }
+                        // No error field — server accepted handshake
+                        return Ok(());
+                    }
+                    return Ok(());
+                }
+                Ok(Message::Close(frame)) => {
+                    if let Some(f) = frame {
+                        return Err(anyhow!("Server closed: {}", f.reason));
+                    }
+                    return Err(anyhow!("Server closed connection"));
+                }
+                Err(e) => return Err(anyhow!("WS error: {}", e)),
+                _ => {}
+            }
+        }
+        // Stream ended without any message
+        Ok(())
+    };
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), recv).await;
+    let _ = tx.send(Message::Close(None)).await;
+    match result {
+        Ok(r) => r,
+        Err(_) => Ok(()), // no response within 5s → assume OK (server is waiting for audio)
+    }
+}
+
+pub async fn run_capture(
+    app: AppHandle,
+    api_key: String,
+    device_name: Option<String>,
+    language: Option<String>,
+    stop_rx: oneshot::Receiver<()>,
+) -> Result<()> {
+    let device = pick_device(device_name.as_deref())?;
+    eprintln!("[audio] device: {}", device.name().unwrap_or_default());
+
+    let (audio_tx, mut audio_rx) = mpsc::channel::<Vec<u8>>(256);
+    let stop_flag = Arc::new(AtomicBool::new(false));
+
+    // Accumulator state lives in the closure
+    let buf: Arc<std::sync::Mutex<Vec<f32>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let tx_clone = audio_tx.clone();
+    let stop_thread = stop_flag.clone();
+    let buf_cb = buf.clone();
+    let chunk_ms: u32 = 100;
+
+    spawn_capture(
+        device,
+        stop_flag.clone(),
+        Box::new(move |mono: &[f32], sample_rate: u32| {
+            if stop_thread.load(Ordering::Relaxed) {
+                return;
+            }
+            let chunk_frames = (sample_rate as usize * chunk_ms as usize) / 1000;
+            let mut b = buf_cb.lock().unwrap();
+            b.extend_from_slice(mono);
+            while b.len() >= chunk_frames {
+                let chunk: Vec<f32> = b.drain(..chunk_frames).collect();
+                let resampled = resample(&chunk, sample_rate);
+                let pcm = to_pcm_bytes(&resampled);
+                if tx_clone.blocking_send(pcm).is_err() {
+                    stop_thread.store(true, Ordering::Relaxed);
+                    return;
+                }
+            }
+        }),
+    )?;
+
+    // Connect WS
+    eprintln!("[ws] connecting...");
     let (ws_stream, _) = connect_async(SONIOX_WS_URL)
         .await
-        .context("Failed to connect to Soniox. Check API key and internet.")?;
-    eprintln!("[ws] Connected");
+        .context("Failed to connect to Soniox. Check internet/key.")?;
+    eprintln!("[ws] connected");
 
     let (mut ws_tx, mut ws_rx) = ws_stream.split();
 
-    // Send start config
-    let start_msg = serde_json::json!({
+    let mut start_msg = serde_json::json!({
         "api_key": api_key,
         "model": "stt-rt-v4",
         "audio_format": "pcm_s16le",
@@ -230,16 +353,21 @@ pub async fn run_capture(
         "num_channels": 1,
         "include_word_timing": true
     });
+    if let Some(lang) = language.as_ref() {
+        if !lang.is_empty() && lang != "auto" {
+            start_msg["language_hints"] = serde_json::Value::Array(vec![
+                serde_json::Value::String(lang.clone()),
+            ]);
+        }
+    }
     ws_tx
         .send(Message::Text(start_msg.to_string()))
         .await
         .context("Failed to send start config")?;
-    eprintln!("[ws] Start config sent");
+    eprintln!("[ws] start config sent");
 
-    // Shutdown channel: recv task → send loop
     let (ws_done_tx, mut ws_done_rx) = tokio::sync::oneshot::channel::<()>();
 
-    // Receive transcripts
     let app_recv = app.clone();
     tokio::spawn(async move {
         let mut stable_text = String::new();
@@ -248,24 +376,24 @@ pub async fn run_capture(
                 Ok(Message::Text(text)) => {
                     if let Ok(parsed) = serde_json::from_str::<SonioxMessage>(&text) {
                         if let Some(err) = parsed.error {
-                            eprintln!("[ws] server error: {}", err);
-                            let _ = app_recv.emit("transcript-error", err);
+                            let code = parsed.error_code.unwrap_or(0);
+                            let display = if code != 0 {
+                                format!("Soniox [{}]: {}", code, err)
+                            } else {
+                                format!("Soniox: {}", err)
+                            };
+                            eprintln!("[ws] server error: {}", display);
+                            let _ = app_recv.emit("transcript-error", display);
                             break;
                         }
                         if let Some(tokens) = parsed.tokens {
                             let meaningful: Vec<&SonioxToken> = tokens
                                 .iter()
-                                .filter(|t| {
-                                    !t.text.is_empty()
-                                        && !t.text.starts_with('<')
-                                })
+                                .filter(|t| !t.text.is_empty() && !t.text.starts_with('<'))
                                 .collect();
-
                             if meaningful.is_empty() {
                                 continue;
                             }
-
-                            // Separate final (committed) tokens from non-final (live hypothesis)
                             let mut final_text = String::new();
                             let mut nonfinal_text = String::new();
                             for t in &meaningful {
@@ -275,20 +403,13 @@ pub async fn run_capture(
                                     nonfinal_text.push_str(&t.text);
                                 }
                             }
-
-                            // Append only finalized words to stable buffer
                             if !final_text.is_empty() {
                                 stable_text.push_str(&final_text);
-                                // Rolling window: keep last 80 words
-                                let words: Vec<&str> =
-                                    stable_text.split_whitespace().collect();
-                                if words.len() > 80 {
-                                    stable_text =
-                                        words[words.len() - 50..].join(" ") + " ";
+                                let words: Vec<&str> = stable_text.split_whitespace().collect();
+                                if words.len() > 120 {
+                                    stable_text = words[words.len() - 80..].join(" ") + " ";
                                 }
                             }
-
-                            // Display = committed words + live non-final hypothesis
                             let display = format!("{}{}", stable_text, nonfinal_text);
                             let display = display.trim().to_string();
                             if !display.is_empty() {
@@ -307,16 +428,15 @@ pub async fn run_capture(
                 _ => {}
             }
         }
-        eprintln!("[ws] Recv loop ended");
+        eprintln!("[ws] recv loop ended");
         let _ = ws_done_tx.send(());
     });
 
-    // Send loop: forward audio → WS
     let mut stop_rx = stop_rx;
     loop {
         tokio::select! {
             _ = &mut stop_rx => {
-                eprintln!("[ws] User stopped recording");
+                eprintln!("[ws] user stopped");
                 stop_flag.store(true, Ordering::Relaxed);
                 let _ = ws_tx.send(Message::Text(
                     serde_json::json!({"type": "finalize"}).to_string()
@@ -325,7 +445,6 @@ pub async fn run_capture(
                 break;
             }
             _ = &mut ws_done_rx => {
-                eprintln!("[ws] WS closed by server");
                 stop_flag.store(true, Ordering::Relaxed);
                 break;
             }
@@ -333,19 +452,15 @@ pub async fn run_capture(
                 match chunk {
                     Some(pcm) => {
                         if let Err(e) = ws_tx.send(Message::Binary(pcm)).await {
-                            eprintln!("[ws] Send error: {}", e);
+                            eprintln!("[ws] send err: {}", e);
                             stop_flag.store(true, Ordering::Relaxed);
                             break;
                         }
                     }
-                    None => {
-                        eprintln!("[ws] Audio channel closed");
-                        break;
-                    }
+                    None => break,
                 }
             }
         }
     }
-
     Ok(())
 }

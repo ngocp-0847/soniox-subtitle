@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -10,51 +10,39 @@ interface TranscriptEvent {
   is_final: boolean;
 }
 
+interface AppSettings {
+  opacity?: number;
+  font_size?: number;
+  max_words?: number;
+  auto_start?: boolean;
+}
+
 export default function App() {
   const [recording, setRecording] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [transcript, setTranscript] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [alwaysOnTop, setAlwaysOnTop] = useState(true);
-  const alwaysOnTopRef = useRef(true); // avoid stale closure in mousedown
+  const alwaysOnTopRef = useRef(true);
   const transcriptRef = useRef<HTMLDivElement>(null);
+  const recordingRef = useRef(false);
 
-  useEffect(() => {
-    // Auto enable always-on-top at start
-    invoke("set_always_on_top", { onTop: true });
-
-    const unlisten1 = listen<TranscriptEvent>("transcript", (e) => {
-      setTranscript(e.payload.text);
-      setError(null);
-    });
-
-    const unlisten2 = listen<string>("transcript-error", (e) => {
-      setError(e.payload);
-      setRecording(false);
-    });
-
-    const unlisten3 = listen<boolean>("recording-state", (e) => {
-      setRecording(e.payload);
-    });
-
-    return () => {
-      unlisten1.then((f) => f());
-      unlisten2.then((f) => f());
-      unlisten3.then((f) => f());
-    };
+  const applySettings = useCallback(async () => {
+    try {
+      const s = await invoke<AppSettings>("get_settings");
+      const opacity = typeof s.opacity === "number" ? s.opacity : 0.92;
+      const fontSize = typeof s.font_size === "number" ? s.font_size : 18;
+      document.documentElement.style.setProperty("--app-bg-opacity", String(opacity));
+      document.documentElement.style.setProperty("--transcript-font-size", `${fontSize}px`);
+    } catch (e) {
+      console.error("[settings load]", e);
+    }
   }, []);
 
-  useEffect(() => {
-    // Auto-scroll transcript
-    if (transcriptRef.current) {
-      transcriptRef.current.scrollTop = transcriptRef.current.scrollHeight;
-    }
-  }, [transcript]);
-
-  const toggleRecording = async () => {
+  const toggleRecording = useCallback(async () => {
     setError(null);
     try {
-      if (recording) {
+      if (recordingRef.current) {
         await invoke("stop_recording");
       } else {
         setTranscript("");
@@ -63,7 +51,55 @@ export default function App() {
     } catch (e: unknown) {
       setError(String(e));
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    recordingRef.current = recording;
+  }, [recording]);
+
+  useEffect(() => {
+    // Apply saved appearance + auto-start on mount
+    (async () => {
+      await applySettings();
+      try {
+        await invoke("set_always_on_top", { onTop: true });
+      } catch {}
+      try {
+        const s = await invoke<AppSettings>("get_settings");
+        if (s.auto_start) {
+          setTimeout(() => toggleRecording(), 500);
+        }
+      } catch {}
+    })();
+
+    const unlisten1 = listen<TranscriptEvent>("transcript", (e) => {
+      setTranscript(e.payload.text);
+      setError(null);
+    });
+    const unlisten2 = listen<string>("transcript-error", (e) => {
+      setError(e.payload);
+      setRecording(false);
+    });
+    const unlisten3 = listen<boolean>("recording-state", (e) => {
+      setRecording(e.payload);
+    });
+    const unlisten4 = listen("shortcut-toggle-recording", () => {
+      toggleRecording();
+    });
+
+    return () => {
+      unlisten1.then((f) => f());
+      unlisten2.then((f) => f());
+      unlisten3.then((f) => f());
+      unlisten4.then((f) => f());
+    };
+  }, [applySettings, toggleRecording]);
+
+  useEffect(() => {
+    if (transcriptRef.current) {
+      transcriptRef.current.scrollTop = transcriptRef.current.scrollHeight;
+    }
+  }, [transcript]);
 
   const toggleAlwaysOnTop = async () => {
     const next = !alwaysOnTop;
@@ -80,7 +116,6 @@ export default function App() {
 
   return (
     <div className={`app ${recording ? "is-recording" : ""}`}>
-      {/* Draggable header */}
       <div
         className="titlebar"
         onMouseDown={async (e) => {
@@ -118,10 +153,12 @@ export default function App() {
       </div>
 
       {showSettings ? (
-        <Settings onClose={() => setShowSettings(false)} />
+        <Settings
+          onClose={() => setShowSettings(false)}
+          onSettingsChanged={applySettings}
+        />
       ) : (
         <>
-          {/* Transcript area */}
           <div className="transcript-area" ref={transcriptRef}>
             {transcript ? (
               <p className="transcript-text">{transcript}</p>
@@ -132,11 +169,8 @@ export default function App() {
             )}
           </div>
 
-          {error && (
-            <div className="error-bar">⚠️ {error}</div>
-          )}
+          {error && <div className="error-bar">⚠️ {error}</div>}
 
-          {/* Controls */}
           <div className="controls">
             <button
               className={`btn-record ${recording ? "recording" : ""}`}

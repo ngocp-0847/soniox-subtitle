@@ -1,8 +1,13 @@
+:root {
+  --app-bg-opacity: 0.92;
+  --transcript-font-size: 18px;
+}
+
 .app {
   display: flex;
   flex-direction: column;
   height: 100vh;
-  background: rgba(10, 10, 14, 0.92);
+  background: rgba(10, 10, 14, var(--app-bg-opacity));
   backdrop-filter: blur(12px);
   border: 1px solid rgba(255,255,255,0.08);
   border-radius: 12px;
@@ -101,13 +106,17 @@
 }
 
 .transcript-text {
-  font-size: 18px;
+  font-size: var(--transcript-font-size);
   line-height: 1.6;
   color: #f0f0f0;
   font-weight: 400;
   white-space: pre-wrap;
   word-break: break-word;
   user-select: text;
+  /* Outline keeps text readable even when overlay is fully transparent over video */
+  text-shadow:
+    0 0 4px rgba(0,0,0,0.85),
+    0 0 8px rgba(0,0,0,0.6);
 }
 
 .transcript-placeholder {
